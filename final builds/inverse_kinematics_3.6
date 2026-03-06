@@ -1,0 +1,141 @@
+import math
+import matplotlib.pyplot as plt
+
+def clamp(v, lo=-1.0, hi=1.0):
+return max(lo, min(hi, v))
+
+def ik_3link_tip_only(l1, l2, l3, x, y, psi_deg=0.0, elbow="down"):
+"""
+2D IK in a plane:
+(x,y) = desired TIP position in that plane
+psi_deg = desired TIP direction in that plane (0 = +x, 90 = +y)
+Returns (t1_deg, t2_deg, t3_deg, xw, yw) or None
+"""
+psi = math.radians(psi_deg)
+
+# Wrist point = tip - L3 * direction
+xw = x - l3 * math.cos(psi)
+yw = y - l3 * math.sin(psi)
+
+r2 = xw*xw + yw*yw
+cos_t2 = (r2 - l1*l1 - l2*l2) / (2*l1*l2)
+
+if cos_t2 < -1.0 or cos_t2 > 1.0:
+return None
+
+cos_t2 = clamp(cos_t2)
+t2 = math.acos(cos_t2)
+if elbow == "up":
+t2 = -t2
+
+t1 = math.atan2(yw, xw) - math.atan2(l2*math.sin(t2), l1 + l2*math.cos(t2))
+
+# Wrist angle to achieve psi
+t3 = psi - t1 - t2
+
+return (math.degrees(t1), math.degrees(t2), math.degrees(t3), xw, yw)
+
+def ik_3d_with_base_yaw(l1, l2, l3, X, Y, Z, psi_deg=0.0, elbow="down"):
+"""
+3D IK by adding a base yaw (left/right):
+World: X forward, Y left/right, Z up
+
+psi_deg here is the TIP pitch angle in the radial plane:
+psi_deg = 0 means pointing outward horizontally
+psi_deg = 90 means pointing upward
+Returns (theta0_deg, theta1_deg, theta2_deg, theta3_deg, r, xw_r, zw) or None
+"""
+# base yaw
+theta0 = math.atan2(Y, X)
+r = math.hypot(X, Y) # radial distance in ground plane
+
+sol2d = ik_3link_tip_only(l1, l2, l3, r, Z, psi_deg=psi_deg, elbow=elbow)
+if sol2d is None:
+return None
+
+t1_deg, t2_deg, t3_deg, xw_r, zw = sol2d
+return (math.degrees(theta0), t1_deg, t2_deg, t3_deg, r, xw_r, zw)
+
+def fk_3d_with_base_yaw(l1, l2, l3, theta0_deg, t1_deg, t2_deg, t3_deg):
+"""
+Forward kinematics for the 4-DOF version:
+theta0 = base yaw about Z axis
+then (t1,t2,t3) are the planar angles in the radial (r-Z) plane
+Returns 3D points p0,p1,p2,p3 as (X,Y,Z)
+"""
+theta0 = math.radians(theta0_deg)
+t1 = math.radians(t1_deg)
+t2 = math.radians(t2_deg)
+t3 = math.radians(t3_deg)
+
+# Planar radii in the r-Z plane
+r0, z0 = 0.0, 0.0
+r1 = r0 + l1 * math.cos(t1)
+z1 = z0 + l1 * math.sin(t1)
+
+r2 = r1 + l2 * math.cos(t1 + t2)
+z2 = z1 + l2 * math.sin(t1 + t2)
+
+r3 = r2 + l3 * math.cos(t1 + t2 + t3)
+z3 = z2 + l3 * math.sin(t1 + t2 + t3)
+
+# Convert (r,z) into (X,Y,Z) using base yaw
+def rz_to_xyz(r, z):
+X = r * math.cos(theta0)
+Y = r * math.sin(theta0)
+return (X, Y, z)
+
+p0 = rz_to_xyz(r0, z0)
+p1 = rz_to_xyz(r1, z1)
+p2 = rz_to_xyz(r2, z2)
+p3 = rz_to_xyz(r3, z3)
+return p0, p1, p2, p3
+
+def plot_diagram_3d_projection(l1, l2, l3, X, Y, Z, psi_deg=0.0, elbow="down"):
+sol = ik_3d_with_base_yaw(l1, l2, l3, X, Y, Z, psi_deg=psi_deg, elbow=elbow)
+if sol is None:
+print("Target is unreachable with these link lengths.")
+return
+
+theta0_deg, t1_deg, t2_deg, t3_deg, r, xw_r, zw = sol
+p0, p1, p2, p3 = fk_3d_with_base_yaw(l1, l2, l3, theta0_deg, t1_deg, t2_deg, t3_deg)
+
+print(f"base_yaw θ0 = {theta0_deg:.2f}°")
+print(f"theta1={t1_deg:.2f}°, theta2={t2_deg:.2f}°, theta3={t3_deg:.2f}°")
+print(f"FK tip reached: ({p3[0]:.2f}, {p3[1]:.2f}, {p3[2]:.2f}) target=({X:.2f}, {Y:.2f}, {Z:.2f})")
+
+# Simple visualization: show TOP view (X-Y) and SIDE view (r-Z)
+fig, (ax1, ax2) = plt.subplots(1, 2, figsize=(12, 5))
+
+# Top view (X-Y)
+ax1.plot([p0[0], p1[0], p2[0], p3[0]], [p0[1], p1[1], p2[1], p3[1]], marker="o")
+ax1.plot(X, Y, "kx", markersize=10)
+ax1.set_aspect("equal", adjustable="box")
+ax1.grid(True)
+ax1.set_title("Top view (X-Y)")
+
+# Side view (r-Z) using r = hypot(X,Y)
+# Recompute planar points (r,z) for clean side plot
+# (just reuse FK but in r-z before yaw)
+t1 = math.radians(t1_deg); t2 = math.radians(t2_deg); t3 = math.radians(t3_deg)
+r0,z0 = 0,0
+r1,z1 = l1*math.cos(t1), l1*math.sin(t1)
+r2,z2 = r1 + l2*math.cos(t1+t2), z1 + l2*math.sin(t1+t2)
+r3,z3 = r2 + l3*math.cos(t1+t2+t3), z2 + l3*math.sin(t1+t2+t3)
+
+ax2.plot([r0,r1,r2,r3], [z0,z1,z2,z3], marker="o")
+ax2.plot(r, Z, "kx", markersize=10)
+ax2.set_aspect("equal", adjustable="box")
+ax2.grid(True)
+ax2.set_title("Side view (r-Z) where r = sqrt(X²+Y²)")
+
+plt.suptitle(f"3D IK via base yaw (psi={psi_deg}°, elbow={elbow})")
+plt.show()
+
+# ----------------- Example run -----------------
+if __name__ == "__main__":
+l1, l2, l3 = 18, 16.5, 7
+
+# Now target is 3D: (X,Y,Z)
+X, Y, Z = 20, 6, 3 # 6 units left, 3 units up
+plot_diagram_3d_projection(l1, l2, l3, X, Y, Z, psi_deg=0, elbow="down")
